@@ -1,0 +1,133 @@
+name: Bump cask
+
+# Orca's source repository is private and publishes its build artifacts as a
+# release *on this repository*. Bumping the cask therefore needs nothing but this
+# repository's own release data -- no token for the private repo, no polling it.
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to bump to (defaults to the latest release)."
+        required: false
+  schedule:
+    - cron: "17 * * * *"   # safety net if a release event is ever missed
+
+concurrency:
+  group: bump-cask
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Resolve the release to publish
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${EVENT_TAG:-${INPUT_TAG:-}}"
+          if [[ -z "$tag" ]]; then
+            tag="$(gh release view --json tagName --jq .tagName)"
+          fi
+          version="${tag#v}"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$tag' does not look like a version tag"
+            exit 1
+          fi
+
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          current="$(sed -n 's/^  version "\(.*\)"/\1/p' Casks/orca.rb)"
+          if [[ "$current" == "$version" ]]; then
+            echo "Cask already at $version."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Bumping cask: $current -> $version"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read the checksum
+        id: sha
+        if: steps.latest.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.latest.outputs.tag }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+          dmg="Orca-${VERSION}.dmg"
+
+          # Prefer the published SHA256SUMS; fall back to hashing the dmg itself.
+          if gh release download "$TAG" -p SHA256SUMS -O SHA256SUMS 2>/dev/null; then
+            sha="$(awk -v f="$dmg" '$2 == f || $2 == "*" f { print $1 }' SHA256SUMS | head -1)"
+          fi
+          if [[ -z "${sha:-}" ]]; then
+            gh release download "$TAG" -p "$dmg" -O "$dmg"
+            sha="$(sha256sum "$dmg" | cut -d' ' -f1)"
+          fi
+
+          if [[ ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::could not resolve a sha256 for $dmg on release $TAG"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # Never ship a cask whose checksum users cannot reproduce.
+      - name: Verify the artifact
+        if: steps.latest.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.latest.outputs.tag }}
+          VERSION: ${{ steps.latest.outputs.version }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          dmg="Orca-${VERSION}.dmg"
+          [[ -f "$dmg" ]] || gh release download "$TAG" -p "$dmg" -O "$dmg"
+          actual="$(sha256sum "$dmg" | cut -d' ' -f1)"
+          if [[ "$actual" != "$SHA" ]]; then
+            echo "::error::checksum mismatch for $dmg (expected $SHA, got $actual)"
+            exit 1
+          fi
+          echo "checksum verified: $actual"
+          rm -f "$dmg"
+
+      - name: Update cask
+        if: steps.latest.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sed -i -e "s/^  version \".*\"/  version \"${VERSION}\"/" \
+                 -e "s/^  sha256 \".*\"/  sha256 \"${SHA}\"/" Casks/orca.rb
+          if git diff --quiet Casks/orca.rb; then
+            echo "::error::cask file unchanged after bump to ${VERSION}"
+            exit 1
+          fi
+          git diff Casks/orca.rb
+
+      - name: Commit
+        if: steps.latest.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "orca ${VERSION}"
+          git push
