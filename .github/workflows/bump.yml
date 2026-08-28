@@ -39,7 +39,14 @@ jobs:
           set -euo pipefail
           tag="${EVENT_TAG:-${INPUT_TAG:-}}"
           if [[ -z "$tag" ]]; then
-            tag="$(gh release view --json tagName --jq .tagName)"
+            # No releases yet (fresh tap, before the first Orca release ships).
+            # That is a clean no-op, not a failure -- the hourly schedule would
+            # otherwise report red every hour until the first release lands.
+            if ! tag="$(gh release view --json tagName --jq .tagName 2>/dev/null)"; then
+              echo "No releases published on this repository yet; nothing to bump."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           version="${tag#v}"
 
