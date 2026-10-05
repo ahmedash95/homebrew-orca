@@ -1,6 +1,6 @@
 cask "orca" do
-  version "0.0.13"
-  sha256 "52393f7f3f70e543d1834ef5f139f14decfce7ca66176fe0aaa6a69f1962a97f"
+  version "0.0.14"
+  sha256 "51d04207f7776a98ea55e627778bbea44f3ddded8c804c252c2287a8da87e17e"
 
   url "https://github.com/ahmedash95/homebrew-orca/releases/download/v#{version}/Orca-#{version}.dmg"
   name "Orca"
